@@ -887,7 +887,7 @@ int enc_loopback(Encoder *enc);
 int of_stream_init(OutputFile *of, OutputStream *ost,
                    const AVCodecContext *enc_ctx);
 int of_write_trailer(OutputFile *of);
-int of_open(const OptionsContext *o, const char *filename, Scheduler *sch, int argc, char **argv);
+int of_open(const OptionsContext *o, const char *filename, Scheduler *sch);
 void of_free(OutputFile **pof);
 
 void of_enc_stats_close(void);

@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <mpi.h>
 
 #if HAVE_IO_H
 #include <io.h>
@@ -968,6 +969,8 @@ int main(int argc, char **argv)
     int ret;
     BenchmarkTimeStamps ti;
 
+    MPI_Init(&argc, &argv);
+
     init_dynload();
 
     setvbuf(stderr,NULL,_IONBF,0); /* win32 runtime needs this */
@@ -1032,6 +1035,8 @@ finish:
 
     av_log(NULL, AV_LOG_VERBOSE, "\n");
     av_log(NULL, AV_LOG_VERBOSE, "Exiting with exit code %d\n", ret);
+
+    MPI_Finalize();
 
     return ret;
 }

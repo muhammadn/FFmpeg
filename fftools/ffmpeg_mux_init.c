@@ -3266,7 +3266,7 @@ static Muxer *mux_alloc(void)
     return mux;
 }
 
-int of_open(const OptionsContext *o, const char *filename, Scheduler *sch, int argc, char **argv)
+int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 {
     Muxer *mux;
     AVFormatContext *oc;
@@ -3283,7 +3283,6 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch, int a
 
     MPI_Request request;
 
-    MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Get_processor_name(hostname, &hostname_len);
@@ -3522,8 +3521,6 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch, int a
             return err;
         }
     }
-
-    MPI_Finalize();
 
     return 0;
 }

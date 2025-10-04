@@ -19,6 +19,7 @@
  */
 
 #include <string.h>
+#include <mpi.h>
 
 #include "cmdutils.h"
 #include "ffmpeg.h"
@@ -3275,6 +3276,17 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     int64_t recording_time = o->recording_time;
     int64_t stop_time      = o->stop_time;
 
+    int      rank, size;
+    int      hostname_len;
+    char     hostname[MPI_MAX_PROCESSOR_NAME];
+
+    MPI_Request request;
+
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Get_processor_name(hostname, &hostname_len);
+
     mux = mux_alloc();
     if (!mux)
         return AVERROR(ENOMEM);
@@ -3357,81 +3369,160 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
         return AVERROR(EINVAL);
     }
 
-    if (!(oc->oformat->flags & AVFMT_NOFILE)) {
-        /* test if it already exists to avoid losing precious files */
-        err = assert_file_overwrite(filename);
-        if (err < 0)
-            return err;
+    // start MPI code to save to rank 0
+    if (rank == 0) {
+        for (int j = 0; j < size; j++) {
+	    /* Receive MPI data from other ranks */
+            MPI_Irecv(&oc, sizeof(oc), MPI_CHAR, j, 0, MPI_COMM_WORLD, &request);
+            av_log(NULL, AV_LOG_INFO, "Writing at rank %d and size %d at host %s\n", rank, size, hostname);
 
-        /* open the file */
-        if ((err = avio_open2(&oc->pb, filename, AVIO_FLAG_WRITE,
-                              &oc->interrupt_callback,
-                              &mux->opts)) < 0) {
-            av_log(mux, AV_LOG_FATAL, "Error opening output %s: %s\n",
-                   filename, av_err2str(err));
-            return err;
-        }
-    } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)) {
-        err = assert_file_overwrite(filename);
-        if (err < 0)
-            return err;
-    }
+            if (!(oc->oformat->flags & AVFMT_NOFILE)) {
+                /* test if it already exists to avoid losing precious files */
+                err = assert_file_overwrite(filename);
+                if (err < 0)
+                    return err;
 
-    if (o->mux_preload) {
-        av_dict_set_int(&mux->opts, "preload", o->mux_preload*AV_TIME_BASE, 0);
-    }
-    oc->max_delay = (int)(o->mux_max_delay * AV_TIME_BASE);
+                /* open the file */
+                if ((err = avio_open2(&oc->pb, filename, AVIO_FLAG_WRITE,
+                                      &oc->interrupt_callback,
+                                      &mux->opts)) < 0) {
+                    av_log(mux, AV_LOG_FATAL, "Error opening output %s: %s\n",
+                           filename, av_err2str(err));
+                    return err;
+                }
+            } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)) {
+                err = assert_file_overwrite(filename);
+                if (err < 0)
+                    return err;
+            }
 
-    /* copy metadata and chapters from input files */
-    err = copy_meta(mux, o);
-    if (err < 0)
-        return err;
+            if (o->mux_preload) {
+                av_dict_set_int(&mux->opts, "preload", o->mux_preload*AV_TIME_BASE, 0);
+            }
+            oc->max_delay = (int)(o->mux_max_delay * AV_TIME_BASE);
 
-    err = of_add_groups(mux, o);
-    if (err < 0)
-        return err;
+            /* copy metadata and chapters from input files */
+            err = copy_meta(mux, o);
+            if (err < 0)
+                return err;
 
-    err = of_add_programs(mux, o);
-    if (err < 0)
-        return err;
+            err = of_add_groups(mux, o);
+            if (err < 0)
+                return err;
 
-    err = of_add_metadata(of, oc, o);
-    if (err < 0)
-        return err;
+            err = of_add_programs(mux, o);
+            if (err < 0)
+                return err;
 
-    err = set_dispositions(mux, o);
-    if (err < 0) {
-        av_log(mux, AV_LOG_FATAL, "Error setting output stream dispositions\n");
-        return err;
-    }
+            err = of_add_metadata(of, oc, o);
+            if (err < 0)
+                return err;
 
-    // parse forced keyframe specifications;
-    // must be done after chapters are created
-    err = process_forced_keyframes(mux, o);
-    if (err < 0) {
-        av_log(mux, AV_LOG_FATAL, "Error processing forced keyframes\n");
-        return err;
-    }
+            err = set_dispositions(mux, o);
+            if (err < 0) {
+                av_log(mux, AV_LOG_FATAL, "Error setting output stream dispositions\n");
+                return err;
+            }
 
-    err = setup_sync_queues(mux, oc, o->shortest_buf_duration * AV_TIME_BASE,
-                            o->shortest);
-    if (err < 0) {
-        av_log(mux, AV_LOG_FATAL, "Error setting up output sync queues\n");
-        return err;
-    }
+            // parse forced keyframe specifications;
+            // must be done after chapters are created
+            err = process_forced_keyframes(mux, o);
+            if (err < 0) {
+                av_log(mux, AV_LOG_FATAL, "Error processing forced keyframes\n");
+                return err;
+            }
 
-    of->url        = filename;
+            err = setup_sync_queues(mux, oc, o->shortest_buf_duration * AV_TIME_BASE,
+                                    o->shortest);
+            if (err < 0) {
+                av_log(mux, AV_LOG_FATAL, "Error setting up output sync queues\n");
+                return err;
+            }
 
-    /* initialize streamcopy streams. */
-    for (int i = 0; i < of->nb_streams; i++) {
-        OutputStream *ost = of->streams[i];
+            of->url        = filename;
 
-        if (!ost->enc) {
-            err = of_stream_init(of, ost, NULL);
+            /* initialize streamcopy streams. */
+            for (int i = 0; i < of->nb_streams; i++) {
+                OutputStream *ost = of->streams[i];
+
+                if (!ost->enc) {
+                    err = of_stream_init(of, ost, NULL);
+                    if (err < 0)
+                        return err;
+                }
+            }
+
+        } 
+    } else {
+	/* We send to rank 0 if we are not rank 0 */
+        MPI_Isend(&oc, sizeof(oc), MPI_CHAR, 0, 0, MPI_COMM_WORLD, &request);
+
+        /* dummy code that outputs to /dev/null */
+        if (!(oc->oformat->flags & AVFMT_NOFILE)) {
+            /* test if it already exists to avoid losing precious files */
+            err = assert_file_overwrite(filename);
+            if (err < 0)
+                return err;
+
+            /* open the file */
+            if ((err = avio_open2(&oc->pb, "/dev/null", AVIO_FLAG_WRITE,
+                                  &oc->interrupt_callback,
+                                  &mux->opts)) < 0) {
+                av_log(mux, AV_LOG_FATAL, "Error opening output %s: %s\n",
+                       filename, av_err2str(err));
+                return err;
+            }
+        } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)) {
+            err = assert_file_overwrite(filename);
             if (err < 0)
                 return err;
         }
+
+        if (o->mux_preload) {
+            av_dict_set_int(&mux->opts, "preload", o->mux_preload*AV_TIME_BASE, 0);
+        }
+        oc->max_delay = (int)(o->mux_max_delay * AV_TIME_BASE);
+
+        /* copy metadata and chapters from input files */
+        err = copy_meta(mux, o);
+        if (err < 0)
+            return err;
+
+        err = of_add_groups(mux, o);
+        if (err < 0)
+            return err;
+
+        err = of_add_programs(mux, o);
+        if (err < 0)
+            return err;
+
+        err = of_add_metadata(of, oc, o);
+        if (err < 0)
+            return err;
+
+        err = set_dispositions(mux, o);
+        if (err < 0) {
+            av_log(mux, AV_LOG_FATAL, "Error setting output stream dispositions\n");
+            return err;
+        }
+
+        // parse forced keyframe specifications;
+        // must be done after chapters are created
+        err = process_forced_keyframes(mux, o);
+        if (err < 0) {
+            av_log(mux, AV_LOG_FATAL, "Error processing forced keyframes\n");
+            return err;
+        }
+
+        err = setup_sync_queues(mux, oc, o->shortest_buf_duration * AV_TIME_BASE,
+                                o->shortest);
+        if (err < 0) {
+            av_log(mux, AV_LOG_FATAL, "Error setting up output sync queues\n");
+            return err;
+        }
     }
+
+    MPI_Finalize();
 
     return 0;
 }

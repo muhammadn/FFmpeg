@@ -3278,7 +3278,7 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 
     int      rank, size;
     int      hostname_len;
-    int      buf_count = 100;
+    int      buf_count = 1024;
     char     hostname[MPI_MAX_PROCESSOR_NAME];
 
     MPI_Request request;

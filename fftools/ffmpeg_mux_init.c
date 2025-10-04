@@ -3266,7 +3266,7 @@ static Muxer *mux_alloc(void)
     return mux;
 }
 
-int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
+int of_open(const OptionsContext *o, const char *filename, Scheduler *sch, int argc, char **argv)
 {
     Muxer *mux;
     AVFormatContext *oc;
@@ -3278,6 +3278,7 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
 
     int      rank, size;
     int      hostname_len;
+    int      buf_count = 100;
     char     hostname[MPI_MAX_PROCESSOR_NAME];
 
     MPI_Request request;
@@ -3373,7 +3374,7 @@ int of_open(const OptionsContext *o, const char *filename, Scheduler *sch)
     if (rank == 0) {
         for (int j = 0; j < size; j++) {
 	    /* Receive MPI data from other ranks */
-            MPI_Irecv(&oc, sizeof(oc), MPI_CHAR, j, 0, MPI_COMM_WORLD, &request);
+            MPI_Irecv(&oc, buf_count, MPI_CHAR, j, 0, MPI_COMM_WORLD, &request);
             av_log(NULL, AV_LOG_INFO, "Writing at rank %d and size %d at host %s\n", rank, size, hostname);
 
             if (!(oc->oformat->flags & AVFMT_NOFILE)) {

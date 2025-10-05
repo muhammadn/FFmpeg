@@ -18,6 +18,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <mpi.h>
 
 #include "ffmpeg.h"
 
@@ -625,119 +626,138 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
     AVCodecContext   *enc = e->enc_ctx;
     const char *type_desc = av_get_media_type_string(enc->codec_type);
     const char    *action = frame ? "encode" : "flush";
-    int ret;
+    int ret; 
+
+    /* MPI specific stuff */
+    int      rank, size;
+    int      hostname_len;
+    char     hostname[MPI_MAX_PROCESSOR_NAME];
+    MPI_Request request;
+
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Get_processor_name(hostname, &hostname_len);
 
     if (frame) {
         FrameData *fd = frame_data(frame);
 
-        if (!fd)
-            return AVERROR(ENOMEM);
+        if (rank == 0) {
+            for(int j = 0; j < size; j++) {
+                MPI_Isend(frame, sizeof(frame), MPI_UINT8_T, j, 0, MPI_COMM_WORLD, &request);
+            }
+        } else {
+            MPI_Irecv(frame, 1024, MPI_UINT8_T, 0, 0, MPI_COMM_WORLD, &request);
 
-        fd->wallclock[LATENCY_PROBE_ENC_PRE] = av_gettime_relative();
-
-        if (ost->enc_stats_pre.io)
-            enc_stats_write(ost, &ost->enc_stats_pre, frame, NULL,
-                            e->frames_encoded);
-
-        e->frames_encoded++;
-        e->samples_encoded += frame->nb_samples;
-
-        if (debug_ts) {
-            av_log(e, AV_LOG_INFO, "encoder <- type:%s "
-                   "frame_pts:%s frame_pts_time:%s time_base:%d/%d\n",
-                   type_desc,
-                   av_ts2str(frame->pts), av_ts2timestr(frame->pts, &enc->time_base),
-                   enc->time_base.num, enc->time_base.den);
-        }
-
-        if (frame->sample_aspect_ratio.num && !ost->frame_aspect_ratio.num)
-            enc->sample_aspect_ratio = frame->sample_aspect_ratio;
-    }
-
-    update_benchmark(NULL);
-
-    ret = avcodec_send_frame(enc, frame);
-    if (ret < 0 && !(ret == AVERROR_EOF && !frame)) {
-        av_log(e, AV_LOG_ERROR, "Error submitting %s frame to the encoder\n",
-               type_desc);
-        return ret;
-    }
-
-    while (1) {
-        FrameData *fd;
-
-        av_packet_unref(pkt);
-
-        ret = avcodec_receive_packet(enc, pkt);
-        update_benchmark("%s_%s %d.%d", action, type_desc,
-                         of->index, ost->index);
-
-        pkt->time_base = enc->time_base;
-
-        /* if two pass, output log on success and EOF */
-        if ((ret >= 0 || ret == AVERROR_EOF) && ost->logfile && enc->stats_out)
-            fprintf(ost->logfile, "%s", enc->stats_out);
-
-        if (ret == AVERROR(EAGAIN)) {
-            av_assert0(frame); // should never happen during flushing
-            return 0;
-        } else if (ret < 0) {
-            if (ret != AVERROR_EOF)
-                av_log(e, AV_LOG_ERROR, "%s encoding failed\n", type_desc);
-            return ret;
-        }
-
-        fd = packet_data(pkt);
-        if (!fd)
-            return AVERROR(ENOMEM);
-        fd->wallclock[LATENCY_PROBE_ENC_POST] = av_gettime_relative();
-
-        // attach stream parameters to first packet if requested
-        avcodec_parameters_free(&fd->par_enc);
-        if (ep->attach_par && !ep->packets_encoded) {
-            fd->par_enc = avcodec_parameters_alloc();
-            if (!fd->par_enc)
+            if (!fd)
                 return AVERROR(ENOMEM);
 
-            ret = avcodec_parameters_from_context(fd->par_enc, enc);
-            if (ret < 0)
-                return ret;
+            fd->wallclock[LATENCY_PROBE_ENC_PRE] = av_gettime_relative();
+
+            if (ost->enc_stats_pre.io)
+                enc_stats_write(ost, &ost->enc_stats_pre, frame, NULL,
+                                e->frames_encoded);
+
+            e->frames_encoded++;
+            e->samples_encoded += frame->nb_samples;
+
+            if (debug_ts) {
+                av_log(e, AV_LOG_INFO, "encoder <- type:%s "
+                       "frame_pts:%s frame_pts_time:%s time_base:%d/%d\n",
+                       type_desc,
+                       av_ts2str(frame->pts), av_ts2timestr(frame->pts, &enc->time_base),
+                       enc->time_base.num, enc->time_base.den);
+            }
+
+            if (frame->sample_aspect_ratio.num && !ost->frame_aspect_ratio.num)
+                enc->sample_aspect_ratio = frame->sample_aspect_ratio;
         }
 
-        pkt->flags |= AV_PKT_FLAG_TRUSTED;
+        update_benchmark(NULL);
 
-        if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
-            ret = update_video_stats(ost, pkt, !!vstats_filename);
-            if (ret < 0)
-                return ret;
-        }
-
-        if (ost->enc_stats_post.io)
-            enc_stats_write(ost, &ost->enc_stats_post, NULL, pkt,
-                            ep->packets_encoded);
-
-        if (debug_ts) {
-            av_log(e, AV_LOG_INFO, "encoder -> type:%s "
-                   "pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s "
-                   "duration:%s duration_time:%s\n",
-                   type_desc,
-                   av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &enc->time_base),
-                   av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, &enc->time_base),
-                   av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, &enc->time_base));
-        }
-
-        ep->data_size += pkt->size;
-
-        ep->packets_encoded++;
-
-        ret = sch_enc_send(ep->sch, ep->sch_idx, pkt);
-        if (ret < 0) {
-            av_packet_unref(pkt);
+        ret = avcodec_send_frame(enc, frame);
+        if (ret < 0 && !(ret == AVERROR_EOF && !frame)) {
+            av_log(e, AV_LOG_ERROR, "Error submitting %s frame to the encoder\n",
+                   type_desc);
             return ret;
+        }
+
+        while (1) {
+            FrameData *fd;
+            printf("Encoding media at rank %d and size %d at host %s\n", rank, size, hostname);
+
+            av_packet_unref(pkt);
+
+            ret = avcodec_receive_packet(enc, pkt);
+            update_benchmark("%s_%s %d.%d", action, type_desc,
+                             of->index, ost->index);
+
+            pkt->time_base = enc->time_base;
+
+            /* if two pass, output log on success and EOF */
+            if ((ret >= 0 || ret == AVERROR_EOF) && ost->logfile && enc->stats_out)
+                fprintf(ost->logfile, "%s", enc->stats_out);
+
+            if (ret == AVERROR(EAGAIN)) {
+                av_assert0(frame); // should never happen during flushing
+                return 0;
+            } else if (ret < 0) {
+                if (ret != AVERROR_EOF)
+                    av_log(e, AV_LOG_ERROR, "%s encoding failed\n", type_desc);
+                return ret;
+            }
+
+            fd = packet_data(pkt);
+            if (!fd)
+                return AVERROR(ENOMEM);
+            fd->wallclock[LATENCY_PROBE_ENC_POST] = av_gettime_relative();
+
+            // attach stream parameters to first packet if requested
+            avcodec_parameters_free(&fd->par_enc);
+            if (ep->attach_par && !ep->packets_encoded) {
+                fd->par_enc = avcodec_parameters_alloc();
+                if (!fd->par_enc)
+                    return AVERROR(ENOMEM);
+
+                ret = avcodec_parameters_from_context(fd->par_enc, enc);
+                if (ret < 0)
+                    return ret;
+            }
+
+            pkt->flags |= AV_PKT_FLAG_TRUSTED;
+
+            if (enc->codec_type == AVMEDIA_TYPE_VIDEO) {
+                ret = update_video_stats(ost, pkt, !!vstats_filename);
+                if (ret < 0)
+                    return ret;
+            }
+
+            if (ost->enc_stats_post.io)
+                enc_stats_write(ost, &ost->enc_stats_post, NULL, pkt,
+                                ep->packets_encoded);
+
+            if (debug_ts) {
+                av_log(e, AV_LOG_INFO, "encoder -> type:%s "
+                       "pkt_pts:%s pkt_pts_time:%s pkt_dts:%s pkt_dts_time:%s "
+                       "duration:%s duration_time:%s\n",
+                       type_desc,
+                       av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &enc->time_base),
+                       av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, &enc->time_base),
+                       av_ts2str(pkt->duration), av_ts2timestr(pkt->duration, &enc->time_base));
+            }
+
+            ep->data_size += pkt->size;
+
+            ep->packets_encoded++;
+
+            ret = sch_enc_send(ep->sch, ep->sch_idx, pkt);
+            if (ret < 0) {
+                av_packet_unref(pkt);
+                return ret;
+            }
         }
     }
 
-    av_assert0(0);
+    return 0;
 }
 
 static enum AVPictureType forced_kf_apply(void *logctx, KeyframeForceCtx *kf,

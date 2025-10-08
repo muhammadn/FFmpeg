@@ -634,17 +634,6 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
     char     hostname[MPI_MAX_PROCESSOR_NAME];
     MPI_Request request;
 
-    int root = 0; // The root process
-
-    // Only the root process has the send buffer and related arrays
-    int* sendbuf = NULL;
-    int* sendcounts = NULL;
-    int* displs = NULL;
-
-    // All processes have a receive buffer
-    int* recvbuf;
-    int recvcount;
-
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Get_processor_name(hostname, &hostname_len);
@@ -652,42 +641,12 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
     if (frame) {
         FrameData *fd = frame_data(frame);
 
-        if (rank == root) {
-            // Prepare data for scattering on the root process
-            sendbuf = (int*)malloc(sizeof(int) * 100); // Example total size
-            for (int i = 0; i < 100; ++i) {
-                sendbuf[i] = i; // Initialize with some values
+        if (rank == 0) {
+            for(int j = 0; j < size; j++) {
+                MPI_Isend(frame, sizeof(frame), MPI_UINT8_T, j, 0, MPI_COMM_WORLD, &request);
             }
-
-            sendcounts = (int*)malloc(sizeof(int) * size);
-            displs = (int*)malloc(sizeof(int) * size);
-
-            // Define varying send counts and displacements
-            int current_displ = 0;
-            for (int i = 0; i < size; ++i) {
-                sendcounts[i] = (i + 1) * 2; // Example: process i receives (i+1)*2 elements
-                displs[i] = current_displ;
-                current_displ += sendcounts[i];
-            }
-
-            // Adjust total sendbuf size if needed based on calculated displacements
-            // For this example, we assume 100 is large enough.
-        }
-
-        // Determine the receive count for each process
-        // This is known by all processes, or can be broadcasted from root
-        // For simplicity, we'll use the same logic as the root used to determine sendcounts
-        recvcount = (rank + 1) * 2;
-        recvbuf = (int*)malloc(sizeof(int) * recvcount);
-
-        // Perform the scatter operation
-        MPI_Iscatterv(sendbuf, sendcounts, displs, MPI_UINT8_T,
-                     recvbuf, recvcount, MPI_UINT8_T,
-                     root, MPI_COMM_WORLD, &request);
-
-        // Print the received data on each process
-        for (int i = 0; i < recvcount; ++i) {
-            printf("Encoding media at rank %d and size %d at host %s\n", rank, size, hostname);
+        } else {
+            MPI_Irecv(frame, 1024, MPI_UINT8_T, 0, 0, MPI_COMM_WORLD, &request);
 
             if (!fd)
                 return AVERROR(ENOMEM);
@@ -795,14 +754,6 @@ static int encode_frame(OutputFile *of, OutputStream *ost, AVFrame *frame,
                 av_packet_unref(pkt);
                 return ret;
             }
-        }
-
-        // Free allocated MPI memory
-        free(recvbuf);
-        if (rank == root) {
-            free(sendbuf);
-            free(sendcounts);
-            free(displs);
         }
     }
 
